@@ -7,7 +7,9 @@ can work.
 """
 import pandas as pd
 import numpy as np
+import boto3
 import argparse
+import hashlib
 
 
 def simulated_feature_set(count):
@@ -89,15 +91,29 @@ def hca_demo(datasets_count, samples_count, features_count):
     :param features_count:
     :return:
     """
+    s3 = boto3.client('s3')
+    buckets = []
     for i in xrange(datasets_count):
-        # create an s3 bucket
+        # generate some data to upload
         tsv = random_tsv_matrix(samples_count, features_count)
-        print(tsv)
-        # s3 write tsv
+        # and use the digest to identify it
+        digest = hashlib.sha512(tsv).hexdigest()
+        bucket_name = 'davidcs-{}'.format(digest[0:20])
+        # create an s3 bucket
+        print(s3.create_bucket(Bucket=bucket_name,
+            CreateBucketConfiguration={'LocationConstraint': 'us-west-2'}))
+        # write it to a file to upload
+        with open('temp', 'w') as f:
+            f.write(tsv)
+        # then upload the file with the same name as the bucket
+        print(s3.upload_file('temp', bucket_name, bucket_name))
+        # to download this file
+        s3.Bucket(bucket_name).download_file(bucket_name, bucket_name)
+        buckets.append(bucket_name)
 
     # put each in its own s3 bucket
     # return me the list of s3 buckets
-    print("")
+    return buckets
 
 
 def main(args=None):
@@ -108,7 +124,7 @@ def main(args=None):
     :return:
     """
     parser = argparse.ArgumentParser(
-        description='Download an HDF5 from the Human Cell Atlas.')
+        description='Generate gene cell matrices in S3 for demonstration.')
     parser.add_argument("datasets_count", type=int,
                         help="The number of datasets to create.")
     parser.add_argument("samples_count", type=int,
@@ -118,5 +134,5 @@ def main(args=None):
 
     parsed = parser.parse_args(args)
     print(parsed)
-    hca_demo(
-        parsed.datasets_count, parsed.samples_count, parsed.features_count)
+    print(hca_demo(
+        parsed.datasets_count, parsed.samples_count, parsed.features_count))
