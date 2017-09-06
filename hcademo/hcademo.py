@@ -7,9 +7,27 @@ can work.
 """
 import pandas as pd
 import numpy as np
+import json
+
 import boto3
 import argparse
 import hashlib
+
+# My buckets
+# filter(lambda x: x['Name'].find('davidcs') != -1, boto3.client('s3').list_buckets()['Buckets'])
+
+# Deleting my buckets
+def my_buckets():
+    return filter(lambda x: x['Name'].find('davidcs') != -1, boto3.client('s3').list_buckets()['Buckets'])
+
+def delete_all():
+    for bucket in [x['Name'] for x in my_buckets()]:
+        try:
+            print(bucket)
+            boto3.resource('s3').Bucket(bucket).objects.delete()
+            boto3.resource('s3').Bucket(bucket).delete()
+        except Exception as e:
+            print(e)
 
 
 def simulated_feature_set(count):
@@ -22,14 +40,16 @@ def simulated_feature_set(count):
     return ["ENSG{}".format(str(x).zfill(8)) for x in xrange(count)]
 
 
-def simulated_cohort(count):
+def simulated_cohort(count, start=0):
     """
     Generates samples given the count following a predictable pattern.
 
     :param count:
+    :param start:   The sample_id to start with.
     :return:
     """
-    return ["SMPL{}".format(str(x).zfill(8)) for x in xrange(count)]
+    return ["SMPL{}".format(str(x).zfill(8)) for x in xrange(
+        start, count + start)]
 
 
 def simulated_row_values(width):
@@ -58,34 +78,42 @@ def simulated_matrix(sample_ids, feature_ids):
         columns=feature_ids)
 
 
-def random_matrix(sample_count, feature_count):
+def random_matrix(sample_count, feature_count, start=0):
     """
     Creates a simulated dataframe with the requested width and height by
     generating random samples.
 
     :param sample_count:
     :param feature_count:
+    :param start: The sampled_id to start with.
     :return:
     """
-    return simulated_matrix(simulated_cohort(sample_count),
+    return simulated_matrix(simulated_cohort(sample_count, start=start),
                             simulated_feature_set(feature_count))
 
 
-def random_tsv_matrix(sample_count, feature_count):
+def random_tsv_matrix(sample_count, feature_count, start=0):
     """
     Creates a random TSV with the requested width and height.
 
     :param sample_count:
     :param feature_count:
+    :param start: The sample_id to start with.
     :return:
     """
-    return random_matrix(sample_count, feature_count).to_csv(sep='\t')
+    return random_matrix(
+        sample_count,
+        feature_count,
+        start=start).to_csv(sep='\t')
 
 
 def hca_demo(datasets_count, samples_count, features_count):
     """
     Loads a simulated gene-cell matrix TSV in buckets. There is a bucket
     created for every dataset.
+
+    Also stages an application bucket that will be used by the microservice
+    to find samples. This is for demonstration only.
     :param datasets_count:
     :param samples_count:
     :param features_count:
@@ -93,26 +121,52 @@ def hca_demo(datasets_count, samples_count, features_count):
     """
     s3 = boto3.client('s3')
     buckets = []
+    # For the demo we are going to create an index so that we know where
+    # every sample is. In the future this would be done by a search engine.
+    #
+    # This index will be used by the microservice to "look up" which samples
+    # exist in which buckets.
+    application_bucket_name = "davidcs-hca-release-service"
+    print(s3.create_bucket(Bucket=application_bucket_name,
+                           CreateBucketConfiguration={
+                               'LocationConstraint': 'us-west-2'}))
+    # This will store the locations of each sample for the index.
+    sample_index = {}
     for i in xrange(datasets_count):
         # generate some data to upload
-        tsv = random_tsv_matrix(samples_count, features_count)
+        first_sample_id = i * samples_count
+        tsv = random_tsv_matrix(
+            samples_count,
+            features_count,
+            start=first_sample_id)
         # and use the digest to identify it
         digest = hashlib.sha512(tsv).hexdigest()
+        print(tsv)
         bucket_name = 'davidcs-{}'.format(digest[0:20])
         # create an s3 bucket
         print(s3.create_bucket(Bucket=bucket_name,
             CreateBucketConfiguration={'LocationConstraint': 'us-west-2'}))
         # write it to a file to upload
-        with open('temp', 'w') as f:
+        with open(bucket_name, 'w') as f:
             f.write(tsv)
         # then upload the file with the same name as the bucket
-        print(s3.upload_file('temp', bucket_name, bucket_name))
+        print(s3.upload_file(bucket_name, bucket_name, bucket_name))
+        # Add a key to the sample_index for this bucket
+        sample_index[bucket_name] = simulated_cohort(
+            samples_count, first_sample_id)
         # to download this file
-        s3.Bucket(bucket_name).download_file(bucket_name, bucket_name)
+        # s3.Bucket(bucket_name).download_file(bucket_name, bucket_name)
         buckets.append(bucket_name)
-
-    # put each in its own s3 bucket
-    # return me the list of s3 buckets
+    # I know there is a better way to do this (s3 json one-liner plz).
+    # Write our demonstration index.json that can be used to find samples to
+    # the filesystem.
+    index_filename = 'index.json'
+    with open(index_filename, 'w') as f:
+        f.write(json.dumps(sample_index))
+    # Upload the index.json to the application bucket.
+    print(s3.upload_file(
+        index_filename, application_bucket_name, index_filename))
+    # return the list of buckets
     return buckets
 
 
